@@ -413,6 +413,21 @@ const EXAM_TYPES = {
 
 const LS_KEYS = { missed:'adn_missed_v1', history:'adn_history_v1', name:'adn_name_v1', split:'adn_split_v1', theme:'adn_theme_v1' };
 
+/* Automatikus eredmény-beküldés egy Google Sheets "Web App" végpontra (Google Apps Script).
+   Ha üresen hagyod, a funkció csendben kikapcsol, és csak a másolás/e-mail marad. */
+const RESULTS_ENDPOINT = "https://script.google.com/macros/s/AKfycbzgJRhyMKvRzrVaPuZ66FzvjVjQ1GmhV2uMq-Y_3sKz19Hj-PBPGH_iJKy1SqvlsWZf/exec";
+function sendResultToSheet(record){
+  if(!RESULTS_ENDPOINT) return;
+  try{
+    fetch(RESULTS_ENDPOINT, {
+      method:'POST',
+      mode:'no-cors',
+      headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify(record),
+    }).catch(()=>{ /* csendes hiba: a diák a másolás/e-mail gombbal még mindig tudja pótolni */ });
+  }catch(e){ /* fetch nem elérhető vagy hálózat nélküli mód — nem blokkoló hiba */ }
+}
+
 /* ============================== STORAGE HELPERS ============================== */
 function lsGet(key, fallback){
   try{ const v = localStorage.getItem(key); return v===null ? fallback : JSON.parse(v); }
@@ -873,6 +888,7 @@ function finishQuiz(){
   hist.unshift(record);
   lsSet(LS_KEYS.history, hist.slice(0,200));
   qz.record = record;
+  sendResultToSheet(record);
   render();
 }
 
@@ -911,8 +927,8 @@ function viewQuizResult(){
     </div>
 
     <div class="panel">
-      <h3>Eredmény elküldése az oktatónak</h3>
-      <p style="color:var(--ink-soft);font-size:.9rem;">Add meg a neved, majd küldd el e-mailben, vagy másold ki a kódot és küldd el bármilyen üzenetben.</p>
+      <h3>Eredmény az oktatónak</h3>
+      ${RESULTS_ENDPOINT ? `<div class="callout info"><strong>Az eredmény automatikusan elküldve.</strong> Add meg lent a neved, hogy az oktatód lássa, kihez tartozik.</div>` : `<p style="color:var(--ink-soft);font-size:.9rem;">Add meg a neved, majd küldd el e-mailben, vagy másold ki a kódot és küldd el bármilyen üzenetben.</p>`}
       <div class="field-row">
         <div class="field" style="flex:1;min-width:200px;">
           <label for="result-name">Neved</label>
@@ -920,7 +936,7 @@ function viewQuizResult(){
         </div>
       </div>
       <div class="btn-row">
-        <a class="btn primary" id="mail-btn" href="${mailto}">E-mail küldése az oktatónak</a>
+        <a class="btn ${RESULTS_ENDPOINT?'':'primary'}" id="mail-btn" href="${mailto}">E-mail küldése az oktatónak${RESULTS_ENDPOINT?' (ha az automata küldés nem menne)':''}</a>
         <button class="btn" id="copy-code-btn">Kód másolása vágólapra</button>
       </div>
       <details style="margin-top:12px;"><summary style="cursor:pointer;color:var(--ink-faint);font-size:.82rem;">Eredménykód megtekintése</summary>
@@ -981,6 +997,10 @@ function wireQuizResult(tab){
       `Név: ${qz.record.name||'(nincs megadva)'}\nMód: ${qz.record.label}\nEredmény: ${qz.correct}/${qz.total} (${pct(qz.correct,qz.total)}%)\n${qz.passCount!==null?('Státusz: '+(qz.passed?'SIKERES':'SIKERTELEN')+'\n'):''}Dátum: ${fmtDate(qz.record.ts)}\n\nEredménykód (add meg az oktatódnak):\n${code}`
     );
     document.getElementById('mail-btn').href = `mailto:annakozsdi@gmail.com?subject=${encodeURIComponent('ADN eredmény - '+(qz.record.name||'névtelen'))}&body=${mailBody}`;
+  });
+  document.getElementById('result-name').addEventListener('blur', e=>{
+    const name = e.target.value.trim();
+    if(name && name !== qz.sentName){ qz.sentName = name; sendResultToSheet(qz.record); }
   });
   document.getElementById('copy-code-btn').addEventListener('click', ()=>copyToClipboard(b64encode(qz.record)));
   document.getElementById('quiz-restart').addEventListener('click', ()=>{ state.quiz=null; render(); });
@@ -1182,6 +1202,7 @@ function viewInstructor(){
   const topMissed = Object.entries(missCount).sort((a,b)=>b[1]-a[1]).slice(0,10);
   return `
     <h2 class="section-title">Oktatói összesítő</h2>
+    ${RESULTS_ENDPOINT ? `<div class="callout info"><strong>Az élő eredmények a Google Sheetedben gyűlnek.</strong> Minden teszt/vizsga automatikusan bekerül oda, amint a tanuló beadja — nyisd meg bármikor, ott mindig friss a kép. Az alábbi beillesztős eszköz csak tartalék, ha valakinek mégsem sikerült volna az automata küldés.</div>` : ''}
     <p class="lede">Illeszd be a tanulóktól kapott eredménykódokat (soronként egyet, vagy akár a teljes e-mail szövegét — a kódot kikeresi belőle), majd dolgozd fel őket egy táblázattá és statisztikává. Semmi nem kerül szerverre, minden a Te böngésződben történik.</p>
     <div class="panel">
       <div class="field">
