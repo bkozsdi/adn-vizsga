@@ -440,45 +440,113 @@ function sendResultToSheet(record){
       method:'POST',
       mode:'no-cors',
       headers:{'Content-Type':'text/plain;charset=utf-8'},
-      body: JSON.stringify(record),
+      body: JSON.stringify(Object.assign({}, record, { code: (getSession()||{}).code || '' })),
     }).catch(()=>{ /* csendes hiba: a diák a másolás/e-mail gombbal még mindig tudja pótolni */ });
   }catch(e){ /* fetch nem elérhető vagy hálózat nélküli mód — nem blokkoló hiba */ }
 }
 
-/* Egyszerű, kliens-oldali belépési kód, hogy véletlenül ne bukkanjon rá bárki a nyilvános
-   linkre. FONTOS: ez NEM valódi védelem — az oldal forráskódjában bárki elolvashatja a kódot,
-   ha ért hozzá. Csak arra jó, hogy a linket ne találja meg és ne használja idegen. Ha meg
-   szeretnéd változtatni a kódot, írd át az alábbi SITE_PIN értékét. */
+/* ============================== BELÉPÉS (hallgatónkénti kód + lejárat) ==============================
+   Minden hallgató saját kódot kap (a Google Táblázat "Hozzaferesek" lapján kezeled). A kód az első
+   belépéstől számított napokig (alapból 30) érvényes. A kódot az Apps Script ellenőrzi.
+   FIGYELEM: ez belépési kapu, nem titkosítás — a kérdések technikailag a forráskódban vannak.
+   Ha RESULTS_ENDPOINT üres, tartalékként az alábbi egyszerű közös kód (SITE_PIN) működik. */
 const SITE_PIN = "ADN2026";
 const PIN_STORAGE_KEY = 'adn_pin_ok_v1';
-function pinGateOk(){ return !SITE_PIN || lsGet(PIN_STORAGE_KEY, false) === true; }
+const SESSION_KEY = 'adn_session_v1';
+const GATE_MSG_KEY = 'adn_gate_msg_v1';
+
+function getSession(){ return lsGet(SESSION_KEY, null); }
+function sessionValid(s){ return !!(s && s.code && s.exp && s.exp > Date.now()); }
+function clearSession(){ try{ localStorage.removeItem(SESSION_KEY); }catch(e){} }
+function fmtDate(ms){
+  const d = new Date(ms); const p = n=>String(n).padStart(2,'0');
+  return `${d.getFullYear()}.${p(d.getMonth()+1)}.${p(d.getDate())}.`;
+}
+function accessUrl(action, code){
+  return RESULTS_ENDPOINT + (RESULTS_ENDPOINT.indexOf('?')>=0?'&':'?') +
+    'action=' + action + '&code=' + encodeURIComponent(code) + '&_=' + Date.now();
+}
+async function remoteAccess(action, code){
+  const res = await fetch(accessUrl(action, code), { method:'GET', redirect:'follow' });
+  if(!res.ok) throw new Error('http '+res.status);
+  return await res.json();
+}
+function reasonText(r){
+  if(!r) return 'Nem sikerült a belépés.';
+  if(r.reason==='expired') return 'Lejárt a hozzáférésed' + (r.expires ? ' ('+fmtDate(r.expires)+')' : '') + '. Kérj új kódot az oktatótól.';
+  if(r.reason==='blocked') return 'Ez a hozzáférés le van tiltva. Kérdezd az oktatót.';
+  return 'Ismeretlen kód. Ellenőrizd, hogy pontosan úgy írtad-e be, ahogy kaptad.';
+}
+function pinGateOk(){
+  if(!RESULTS_ENDPOINT) return !SITE_PIN || lsGet(PIN_STORAGE_KEY, false) === true;
+  return sessionValid(getSession());
+}
 function showPinGate(){
+  const legacy = !RESULTS_ENDPOINT;
+  let pending = lsGet(GATE_MSG_KEY, '');
+  if(pending){ try{ localStorage.removeItem(GATE_MSG_KEY); }catch(e){} }
+  const prev = getSession();
+  if(!pending && prev && prev.exp && prev.exp <= Date.now()){
+    pending = 'Lejárt a hozzáférésed (' + fmtDate(prev.exp) + '). Kérj új kódot az oktatótól.';
+  }
   document.body.innerHTML = `
     <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:var(--bg);padding:24px;">
-      <div class="panel" style="max-width:360px;width:100%;">
-        <h2 style="margin-top:0;">Belépési kód</h2>
-        <p class="lede" style="margin-bottom:16px;">Ez a felület csak a tanfolyam résztvevőinek készült. Kérlek add meg a tőled kapott kódot.</p>
+      <div class="panel" style="max-width:380px;width:100%;">
+        <h2 style="margin-top:0;">Belépés</h2>
+        <p class="lede" style="margin-bottom:16px;">Ez a felület a tanfolyam résztvevőinek készült. Add meg a tőled kapott személyes hozzáférési kódot.</p>
         <div class="field">
-          <label for="pin-input">Kód</label>
-          <input type="password" id="pin-input" autocomplete="off" placeholder="••••••">
+          <label for="pin-input">Hozzáférési kód</label>
+          <input type="text" id="pin-input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="pl. ADN-AB12CD">
         </div>
-        <p id="pin-error" style="color:var(--danger);font-size:.85rem;min-height:1.2em;margin-top:8px;"></p>
+        <p id="pin-error" style="color:var(--danger);font-size:.85rem;min-height:1.2em;margin-top:8px;">${esc(pending)}</p>
         <div class="btn-row"><button class="btn primary" id="pin-submit">Belépés</button></div>
       </div>
     </div>
   `;
-  const submit = ()=>{
-    const val = document.getElementById('pin-input').value.trim();
-    if(val === SITE_PIN){
-      lsSet(PIN_STORAGE_KEY, true);
-      location.reload();
-    } else {
-      document.getElementById('pin-error').textContent = 'Helytelen kód, próbáld újra.';
+  const input = document.getElementById('pin-input');
+  const btn = document.getElementById('pin-submit');
+  const err = document.getElementById('pin-error');
+  const submit = async ()=>{
+    const val = input.value.trim();
+    if(!val){ err.textContent = 'Írd be a kódot.'; return; }
+    if(legacy){
+      if(val === SITE_PIN){ lsSet(PIN_STORAGE_KEY, true); location.reload(); }
+      else err.textContent = 'Helytelen kód, próbáld újra.';
+      return;
+    }
+    btn.disabled = true; err.textContent = 'Ellenőrzés…';
+    try{
+      const r = await remoteAccess('login', val);
+      if(r && r.ok){
+        lsSet(SESSION_KEY, { code: val, name: r.name||'', exp: r.expires, checkedAt: Date.now() });
+        if(r.name) lsSet(LS_KEYS.name, r.name);
+        location.reload();
+      } else {
+        err.textContent = reasonText(r);
+        btn.disabled = false;
+      }
+    }catch(e){
+      err.textContent = 'Nem sikerült ellenőrizni a kódot (hálózati hiba). Próbáld újra egy perc múlva.';
+      btn.disabled = false;
     }
   };
-  document.getElementById('pin-submit').addEventListener('click', submit);
-  document.getElementById('pin-input').addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
-  document.getElementById('pin-input').focus();
+  btn.addEventListener('click', submit);
+  input.addEventListener('keydown', e=>{ if(e.key==='Enter') submit(); });
+  input.focus();
+}
+/* Háttérellenőrzés: ha közben lejárt vagy letiltották a kódot, a következő betöltéskor a kapu jön. */
+function backgroundVerify(){
+  const s = getSession();
+  if(!RESULTS_ENDPOINT || !s) return;
+  remoteAccess('check', s.code).then(r=>{
+    if(r && r.ok){
+      s.exp = r.expires; s.name = r.name||s.name; s.checkedAt = Date.now(); lsSet(SESSION_KEY, s);
+    } else if(r && (r.reason==='expired' || r.reason==='blocked' || r.reason==='invalid')){
+      clearSession();
+      lsSet(GATE_MSG_KEY, reasonText(r));
+      location.reload();
+    }
+  }).catch(()=>{ /* hálózati hiba: marad a helyi érvényesség */ });
 }
 
 /* ============================== STORAGE HELPERS ============================== */
@@ -601,7 +669,11 @@ function viewOverview(){
   const imgTotal = QUESTIONS.filter(q=>q.img).length;
   const imgResolved = QUESTIONS.filter(q=>q.imgData).length;
   const imgMissing = imgTotal - imgResolved;
+  const sess = getSession();
+  const accessNote = (RESULTS_ENDPOINT && sessionValid(sess))
+    ? `<p style="color:var(--ink-faint);font-size:.85rem;margin:0 0 12px;">${sess.name?esc(sess.name)+' · ':''}hozzáférésed érvényes: ${fmtDate(sess.exp)}-ig (${Math.max(0,Math.ceil((sess.exp-Date.now())/86400000))} nap van hátra)</p>` : '';
   return `
+    ${accessNote}
     <p class="lede">Ez a felület a feltöltött ADN kérdésbankból épült: tananyagként böngészheted a kérdéseket a helyes válasszal és a jogszabályi hivatkozással, gyakorolhatsz kártyázva, összeállíthatsz saját gyakorló tesztet, vagy kipróbálhatod a hivatalos vizsga szerkezetét követő szimulációt.</p>
     <div class="grid-cards">
       <div class="stat-card"><div class="n num">${total}</div><div class="l">kérdés összesen</div></div>
@@ -1352,6 +1424,7 @@ if(!pinGateOk()){
   showPinGate();
 } else {
   render();
+  backgroundVerify();
 }
 </script>
 </body>
